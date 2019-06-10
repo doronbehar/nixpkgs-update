@@ -15,6 +15,7 @@ module Utils
   , runtimeDir
   , srcOrMain
   , prTitle
+  , eTError
   ) where
 
 import OurPrelude
@@ -115,8 +116,8 @@ setupNixpkgs o = do
   setCurrentDirectory fp
   setEnv "NIX_PATH" ("nixpkgs=" <> fp) True
 
-overwriteErrorT :: MonadIO m => Text -> ExceptT Text m a -> ExceptT Text m a
-overwriteErrorT t = fmapLT (const t)
+overwriteErrorT :: Member (Error Text) r => Text -> Sem r a -> Sem r a
+overwriteErrorT t = flip catch (const (throw t))
 
 branchName :: UpdateEnv -> Text
 branchName ue = "auto-update/" <> packageName ue
@@ -131,5 +132,13 @@ parseUpdates = map (toTriple . T.words) . T.lines
 tRead :: Read a => Text -> a
 tRead = read . T.unpack
 
-srcOrMain :: MonadIO m => (Text -> ExceptT Text m a) -> Text -> ExceptT Text m a
-srcOrMain et attrPath = et (attrPath <> ".src") <|> et attrPath
+srcOrMain ::
+     Members '[ Lift IO, Error Text] r => (Text -> Sem r a) -> Text -> Sem r a
+srcOrMain et attrPath = et (attrPath <> ".src") `catch` const (et attrPath)
+
+eTError :: Member (Error e) r => ExceptT e (Sem r) a -> Sem r a
+eTError et = do
+  e <- runExceptT et
+  case e of
+    Left err -> throw err
+    Right a -> return a

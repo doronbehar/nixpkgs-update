@@ -13,6 +13,8 @@ module OurPrelude
   , module Data.Bifunctor
   , module System.Process.Typed
   , module Polysemy
+  , module Polysemy.Error
+  , module Polysemy.Output
   , Set
   , Text
   , Vector
@@ -43,6 +45,8 @@ import Data.Vector (Vector)
 import Language.Haskell.TH.Quote
 import qualified NeatInterpolation
 import Polysemy
+import Polysemy.Error
+import Polysemy.Output
 import System.Process.Typed hiding (setEnv)
 
 interpolate :: QuasiQuoter
@@ -51,8 +55,12 @@ interpolate = NeatInterpolation.text
 tshow :: Show a => a -> Text
 tshow = show >>> pack
 
-tryIOTextET :: MonadIO m => IO a -> ExceptT Text m a
-tryIOTextET = syncIO >>> fmapLT tshow
+tryIOTextET :: Members '[ Lift IO, Error Text] r => IO a -> Sem r a
+tryIOTextET io = do
+  result <- liftIO $ tryIO io & runExceptT
+  case result of
+    Left error -> throw (tshow error)
+    Right result -> return result
 
 whenM :: Monad m => m Bool -> m () -> m ()
 whenM c a = c >>= \res -> when res a
@@ -61,11 +69,11 @@ bytestringToText :: BSL.ByteString -> Text
 bytestringToText = BSL.toStrict >>> T.decodeUtf8
 
 ourReadProcessInterleaved_ ::
-     MonadIO m
+     Members '[ Lift IO, Error Text] r
   => ProcessConfig stdin stdoutIgnored stderrIgnored
-  -> ExceptT Text m Text
+  -> Sem r Text
 ourReadProcessInterleaved_ processConfig =
-  readProcessInterleaved_ processConfig & tryIOTextET & fmapRT bytestringToText
+  readProcessInterleaved_ processConfig & tryIOTextET & fmap bytestringToText
 
 silently :: ProcessConfig stdin stdout stderr -> ProcessConfig () () ()
 silently t = setStdin closed $ setStdout closed $ setStderr closed t

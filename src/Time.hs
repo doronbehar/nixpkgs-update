@@ -6,12 +6,12 @@ import OurPrelude
 
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
-import Data.Time.Format
-  ( defaultTimeLocale
-  , formatTime
-  , iso8601DateFormat
-  , parseTimeOrError
-  )
+import Data.Time.Format (defaultTimeLocale, formatTime, iso8601DateFormat)
+
+-- $setup
+-- >>> import Data.Time.Format (parseTimeOrError)
+-- >>> let exampleCurrentTime = parseTimeOrError False defaultTimeLocale "%Y-%-m-%-d" "2019-06-06" :: UTCTime
+--
 
 data Time m a where
   Now :: Time m UTCTime
@@ -21,17 +21,14 @@ makeSem ''Time
 runIO :: Member (Lift IO) r => Sem (Time ': r) a -> Sem r a
 runIO =
   interpret $ \case
-    Now -> sendM getCurrentTime
-
+    Now -> sendM getCurrentTim
+e
 runPure :: UTCTime -> Sem (Time ': r) a -> Sem r a
 runPure t =
   interpret $ \case
     Now -> pure t
 
 -- | Return the UTC time 1 hour ago
---
--- $setup
--- >>> let exampleCurrentTime = parseTimeOrError False defaultTimeLocale "%Y-%-m-%-d" "2019-06-06" :: UTCTime
 --
 -- Examples:
 --

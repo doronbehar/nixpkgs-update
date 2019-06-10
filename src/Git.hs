@@ -17,7 +17,8 @@ import OurPrelude
 
 import Control.Concurrent
 
-import Control.Exception
+import Control.Exception hiding (catch, throw)
+import qualified Control.Exception
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Text as T
@@ -26,7 +27,7 @@ import qualified Data.Text.IO as T
 import Data.Time.Clock (addUTCTime, getCurrentTime)
 import System.Directory (getHomeDirectory, getModificationTime)
 import System.Exit
-import Utils (Options(..), UpdateEnv(..), branchName)
+import Utils (Options(..), UpdateEnv(..), branchName, overwriteErrorT)
 
 clean :: ProcessConfig () () ()
 clean = silently "git clean -fdx"
@@ -45,7 +46,7 @@ deleteOrigin :: Text -> ProcessConfig () () ()
 deleteOrigin branch =
   silently $ proc "git" ["push", "origin", T.unpack (":" <> branch)]
 
-cleanAndResetTo :: MonadIO m => Text -> ExceptT Text m ()
+cleanAndResetTo :: Members '[ Lift IO, Error Text] r => Text -> Sem r ()
 cleanAndResetTo branch =
   let target = "upstream/" <> branch
    in do runProcessNoIndexIssue_ $ silently "git reset --hard"
@@ -54,12 +55,12 @@ cleanAndResetTo branch =
          runProcessNoIndexIssue_ $ reset target
          runProcessNoIndexIssue_ clean
 
-cleanup :: MonadIO m => Text -> ExceptT Text m ()
+cleanup :: Members '[ Lift IO, Error Text] r => Text -> Sem r ()
 cleanup bName = do
   liftIO $ T.putStrLn ("Cleaning up " <> bName)
   cleanAndResetTo "master"
-  runProcessNoIndexIssue_ (delete bName) <|>
-    liftIO (T.putStrLn ("Couldn't delete " <> bName))
+  runProcessNoIndexIssue_ (delete bName) `catch`
+    const (liftIO $ T.putStrLn ("Couldn't delete " <> bName))
 
 staleFetchHead :: MonadIO m => m Bool
 staleFetchHead =
@@ -70,15 +71,15 @@ staleFetchHead =
     fetchedLast <- getModificationTime fetchHead
     return (fetchedLast < oneHourAgo)
 
-fetchIfStale :: MonadIO m => ExceptT Text m ()
+fetchIfStale :: Members '[ Lift IO, Error Text] r => Sem r ()
 fetchIfStale = whenM staleFetchHead fetch
 
-fetch :: MonadIO m => ExceptT Text m ()
+fetch :: Members '[ Lift IO, Error Text] r => Sem r ()
 fetch =
   runProcessNoIndexIssue_ $
   silently "git fetch -q --prune --multiple upstream origin"
 
-push :: MonadIO m => UpdateEnv -> ExceptT Text m ()
+push :: Members '[ Lift IO, Error Text] r => UpdateEnv -> Sem r ()
 push updateEnv =
   runProcessNoIndexIssue_
     (proc
@@ -91,39 +92,41 @@ push updateEnv =
         ] ++
         ["--dry-run" | dryRun (options updateEnv)]))
 
-checkoutAtMergeBase :: MonadIO m => Text -> ExceptT Text m ()
+checkoutAtMergeBase :: Members '[ Lift IO, Error Text] r => Text -> Sem r ()
 checkoutAtMergeBase bName = do
   base <-
     readProcessInterleavedNoIndexIssue_
-      "git merge-base upstream/master upstream/staging" &
-    fmapRT T.strip
+      "git merge-base upstream/master upstream/staging" <&>
+    T.strip
   runProcessNoIndexIssue_ (checkout bName base)
 
-checkAutoUpdateBranchDoesntExist :: MonadIO m => Text -> ExceptT Text m ()
+checkAutoUpdateBranchDoesntExist ::
+     Members '[ Lift IO, Error Text] r => Text -> Sem r ()
 checkAutoUpdateBranchDoesntExist pName = do
   remoteBranches <-
-    readProcessInterleavedNoIndexIssue_ "git branch --remote" &
-    fmapRT (T.lines >>> fmap T.strip)
+    readProcessInterleavedNoIndexIssue_ "git branch --remote" <&>
+    (T.lines >>> fmap T.strip)
+  throw "Update branch already on origin. "
   when
     (("origin/auto-update/" <> pName) `elem` remoteBranches)
-    (throwE "Update branch already on origin. ")
+    (throw "Update branch already on origin. ")
 
-commit :: MonadIO m => Text -> ExceptT Text m ()
+commit :: Members '[ Lift IO, Error Text] r => Text -> Sem r ()
 commit ref =
   runProcessNoIndexIssue_ (proc "git" ["commit", "-am", T.unpack ref])
 
-headHash :: MonadIO m => ExceptT Text m Text
+headHash :: Members '[ Lift IO, Error Text] r => Sem r Text
 headHash = readProcessInterleavedNoIndexIssue_ "git rev-parse HEAD"
 
-deleteBranchEverywhere :: MonadIO m => Text -> ExceptT Text m ()
+deleteBranchEverywhere :: Members '[ Lift IO, Error Text] r => Text -> Sem r ()
 deleteBranchEverywhere bName = do
-  runProcessNoIndexIssue_ (delete bName) <|>
-    liftIO (T.putStrLn ("Couldn't delete " <> bName))
-  runProcessNoIndexIssue_ (deleteOrigin bName) <|>
-    liftIO (T.putStrLn ("Couldn't delete " <> bName <> " on origin"))
+  runProcessNoIndexIssue_ (delete bName) `catch`
+    (const $ liftIO $ T.putStrLn $ ("Couldn't delete " <> bName))
+  runProcessNoIndexIssue_ (deleteOrigin bName) `catch`
+    (const $ liftIO $ T.putStrLn $ "Couldn't delete " <> bName <> " on origin")
 
 runProcessNoIndexIssue_ ::
-     MonadIO m => ProcessConfig () () () -> ExceptT Text m ()
+     Members '[ Lift IO, Error Text] r => ProcessConfig () () () -> Sem r ()
 runProcessNoIndexIssue_ config = tryIOTextET go
   where
     go = do
@@ -134,10 +137,11 @@ runProcessNoIndexIssue_ config = tryIOTextET go
             threadDelay 100000
             go
         ExitSuccess -> return ()
-        ExitFailure _ -> throw $ ExitCodeException code config out e
+        ExitFailure _ ->
+          Control.Exception.throw $ ExitCodeException code config out e
 
 readProcessInterleavedNoIndexIssue_ ::
-     MonadIO m => ProcessConfig () () () -> ExceptT Text m Text
+     Members '[ Lift IO, Error Text] r => ProcessConfig () () () -> Sem r Text
 readProcessInterleavedNoIndexIssue_ config = tryIOTextET go
   where
     go = do
@@ -148,4 +152,5 @@ readProcessInterleavedNoIndexIssue_ config = tryIOTextET go
             threadDelay 100000
             go
         ExitSuccess -> return $ (BSL.toStrict >>> T.decodeUtf8) out
-        ExitFailure _ -> throw $ ExitCodeException code config out out
+        ExitFailure _ ->
+          Control.Exception.throw $ ExitCodeException code config out out

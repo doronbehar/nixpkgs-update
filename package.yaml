@@ -16,7 +16,8 @@ extra-source-files:
 
 github: ryantm/nixpkgs-update
 
-ghc-options: -Wall -O2 -flate-specialise -fspecialise-aggressively
+ghc-options: -Wall -O2 -flate-specialise -fspecialise-aggressively -fplugin=Polysemy.Plugin
+
 
 default-extensions:
   - DataKinds
@@ -55,6 +56,7 @@ dependencies:
   - unix
   - vector
   - xdg-basedir
+  - polysemy-plugin
 
 executables:
   nixpkgs-update:

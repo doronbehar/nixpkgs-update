@@ -25,8 +25,8 @@ import qualified GH
 import qualified Git
 import qualified Nix
 import Outpaths
-import Prelude hiding (log)
 import qualified Time
+import Time (Time)
 import Utils
   ( Options(..)
   , UpdateEnv(..)
@@ -45,41 +45,40 @@ data MergeBaseOutpathsInfo = MergeBaseOutpathsInfo
   , mergeBaseOutpaths :: Set ResultLine
   }
 
-log' :: MonadIO m => FilePath -> Text -> m ()
-log' logFile msg = do
-  runDate <- liftIO $ runM $ Time.runIO Time.runDate
-  liftIO $ T.appendFile logFile (runDate <> " " <> msg <> "\n")
-
-updateAll :: Options -> Text -> IO ()
-updateAll o updates = do
-  rDir <- runtimeDir
-  let logFile = rDir <> "/ups.log"
-  let log = log' logFile
-  T.appendFile logFile "\n\n"
-  log "New run of ups.sh"
-  twoHoursAgo <- runM $ Time.runIO Time.twoHoursAgo
+-- log' :: MonadIO m => FilePath -> Text -> m ()
+-- log' logFile msg = do
+--   runDate <- liftIO $ runM $ Time.runIO Time.runDate
+--   liftIO $ T.appendFile logFile (runDate <> " " <> msg <> "\n")
+updateAll ::
+     Members '[ Lift IO, Output Text, Time] r => Options -> Text -> Sem r ()
+updateAll o updates
+  -- rDir <- runtimeDir
+  -- let logFile = rDir <> "/ups.log"
+  -- let log = log' logFile
+ = do
+  output "\n\nNew run of ups.sh"
+  twoHoursAgo <- Time.twoHoursAgo
   mergeBaseOutpathSet <-
     liftIO $ newIORef (MergeBaseOutpathsInfo twoHoursAgo S.empty)
-  updateLoop o log (parseUpdates updates) mergeBaseOutpathSet
+  updateLoop o (parseUpdates updates) mergeBaseOutpathSet
 
 updateLoop ::
-     MonadIO m
+     Members '[ Lift IO, Output Text, Time] r
   => Options
-  -> (Text -> m ())
   -> [Either Text (Text, Version, Version)]
   -> IORef MergeBaseOutpathsInfo
-  -> m ()
-updateLoop _ log [] _ = log "ups.sh finished"
-updateLoop o log (Left e:moreUpdates) mergeBaseOutpathsContext = do
-  log e
-  updateLoop o log moreUpdates mergeBaseOutpathsContext
-updateLoop o log (Right (pName, oldVer, newVer):moreUpdates) mergeBaseOutpathsContext = do
-  log (pName <> " " <> oldVer <> " -> " <> newVer)
+  -> Sem r ()
+updateLoop _ [] _ = output "ups.sh finished"
+updateLoop o (Left e:moreUpdates) mergeBaseOutpathsContext = do
+  output e
+  updateLoop o moreUpdates mergeBaseOutpathsContext
+updateLoop o (Right (pName, oldVer, newVer):moreUpdates) mergeBaseOutpathsContext = do
+  output (pName <> " " <> oldVer <> " -> " <> newVer)
   let updateEnv = UpdateEnv pName oldVer newVer o
-  updated <- updatePackage log updateEnv mergeBaseOutpathsContext
+  updated <- updatePackage updateEnv mergeBaseOutpathsContext
   case updated of
     Left failure -> do
-      log $ "FAIL " <> failure
+      output $ "FAIL " <> failure
       cleanupResult <- runExceptT $ Git.cleanup (branchName updateEnv)
       case cleanupResult of
         Left e -> liftIO $ print e
@@ -88,25 +87,23 @@ updateLoop o log (Right (pName, oldVer, newVer):moreUpdates) mergeBaseOutpathsCo
             then let Just newNewVersion = ".0" `T.stripSuffix` newVer
                   in updateLoop
                        o
-                       log
                        (Right (pName, oldVer, newNewVersion) : moreUpdates)
                        mergeBaseOutpathsContext
-            else updateLoop o log moreUpdates mergeBaseOutpathsContext
+            else updateLoop o moreUpdates mergeBaseOutpathsContext
     Right _ -> do
-      log "SUCCESS"
-      updateLoop o log moreUpdates mergeBaseOutpathsContext
+      output "SUCCESS"
+      updateLoop o moreUpdates mergeBaseOutpathsContext
 
 -- Arguments this function should have to make it testable:
 -- * the merge base commit (should be updated externally to this function)
 -- * the merge base context should be updated externally to this function
 -- * the commit for branches: master, staging, staging-next, python-unstable
 updatePackage ::
-     MonadIO m
-  => (Text -> m ())
-  -> UpdateEnv
+     Members '[ Lift IO, Output Text, Time] r
+  => UpdateEnv
   -> IORef MergeBaseOutpathsInfo
-  -> m (Either Text ())
-updatePackage log updateEnv mergeBaseOutpathsContext =
+  -> Sem r (Either Text ())
+updatePackage updateEnv mergeBaseOutpathsContext =
   runExceptT $ do
     Blacklist.packageName (packageName updateEnv)
     Nix.assertNewerVersion updateEnv
@@ -125,7 +122,7 @@ updatePackage log updateEnv mergeBaseOutpathsContext =
     assertNotUpdatedOn updateEnv derivationFile "staging-next"
     assertNotUpdatedOn updateEnv derivationFile "python-unstable"
     Git.checkoutAtMergeBase (branchName updateEnv)
-    oneHourAgo <- liftIO $ runM $ Time.runIO Time.oneHourAgo
+    oneHourAgo <- lift $ Time.oneHourAgo
     mergeBaseOutpathsInfo <- liftIO $ readIORef mergeBaseOutpathsContext
     mergeBaseOutpathSet <-
       if lastUpdated mergeBaseOutpathsInfo < oneHourAgo
@@ -158,20 +155,19 @@ updatePackage log updateEnv mergeBaseOutpathsContext =
     when (numPRebuilds == 0) (throwE "Update edits cause no rebuilds.")
     Nix.build attrPath
     result <- Nix.resultLink
-    publishPackage log updateEnv oldSrcUrl newSrcUrl attrPath result opDiff
+    return () --publishPackage updateEnv oldSrcUrl newSrcUrl attrPath result opDiff
 
 publishPackage ::
-     MonadIO m
-  => (Text -> m ())
-  -> UpdateEnv
+     Members '[ Lift IO, Output Text, Error Text] r
+  => UpdateEnv
   -> Text
   -> Text
   -> Text
   -> Text
   -> Set ResultLine
-  -> ExceptT Text m ()
-publishPackage log updateEnv oldSrcUrl newSrcUrl attrPath result opDiff = do
-  lift $ log ("cachix " <> (T.pack . show) result)
+  -> Sem r ()
+publishPackage updateEnv oldSrcUrl newSrcUrl attrPath result opDiff = do
+  output $ "cachix " <> (T.pack . show) result
   Nix.cachix result
   resultCheckReport <-
     case Blacklist.checkResult (packageName updateEnv) of
